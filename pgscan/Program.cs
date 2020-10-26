@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Inedo.DependencyScan
@@ -19,18 +20,84 @@ namespace Inedo.DependencyScan
                 if (string.IsNullOrWhiteSpace(argList.Command))
                     throw new PgScanException("Command is not specified.", true);
 
-                switch (argList.Command.ToLowerInvariant())
+                var inputFiles = new SortedSet<string>(StringComparer.CurrentCultureIgnoreCase);
+
+                var inputName = argList.GetRequiredNamed("input")?.Replace('/', '\\');
+                if (inputName.Contains('*'))
                 {
-                    case "report":
-                        Report(argList);
-                        break;
+                    var folder = "";
+                    var fileSpec = "";
+                    SearchOption opt = SearchOption.AllDirectories;
 
-                    case "publish":
-                        Publish(argList);
-                        break;
+                    // Need to find matching files in folder
+                    if (inputName.Contains("**"))
+                    {
+                        var parts = inputName.Split("**");
+                        folder = parts[0].TrimEnd('\\');
+                        fileSpec = parts[parts.Length - 1].Trim('\\');
 
-                    default:
-                        throw new PgScanException($"Invalid command: {argList.Command}", true);
+                        if (string.IsNullOrWhiteSpace(fileSpec))
+                        {
+                            fileSpec = "*.??proj";
+                        }
+                    }
+                    else
+                    {
+                        var parts = inputName.Split("*");
+                        folder = parts[0].TrimEnd('\\');
+                        fileSpec = parts[parts.Length - 1].Trim('\\');
+                        if (string.IsNullOrWhiteSpace(fileSpec))
+                        {
+                            fileSpec = "*.??proj";
+                        }
+                        else
+                        {
+                            fileSpec = $"*{fileSpec}";
+                        }
+                        opt = SearchOption.TopDirectoryOnly;
+
+                    }
+
+                    if (string.IsNullOrWhiteSpace(folder))
+                    {
+                        folder = Environment.CurrentDirectory;
+                    }
+
+                    Console.WriteLine($"folder:   '{folder}'");
+                    Console.WriteLine($"fileSpec: '{fileSpec}'");
+
+                    var possibleMatches = Directory.GetFiles(folder, fileSpec, opt);
+                    foreach (var possible in possibleMatches)
+                    {
+                        inputFiles.Add(possible);
+                    }
+                }
+                else
+                {
+                    inputFiles.Add(inputName);
+                }
+
+                var position = argList.GetNamedPosition("input");
+
+                foreach (var inputFile in inputFiles)
+                {
+                    args[position] = $"--input=\"{inputFile}\"";
+
+                    argList = new ArgList(args);
+
+                    switch (argList.Command.ToLowerInvariant())
+                    {
+                        case "report":
+                            Report(argList);
+                            break;
+
+                        case "publish":
+                            Publish(argList);
+                            break;
+
+                        default:
+                            throw new PgScanException($"Invalid command: {argList.Command}", true);
+                    }
                 }
             }
             catch (PgScanException ex)
@@ -50,6 +117,8 @@ namespace Inedo.DependencyScan
         {
             if (!args.Named.TryGetValue("input", out var inputFileName))
                 throw new PgScanException("Missing required argument --input=<input file name>");
+
+            Console.WriteLine($"Reporting {inputFileName}...");
 
             args.Named.TryGetValue("type", out var typeName);
             typeName = typeName ?? GetImplicitTypeName(inputFileName);
@@ -79,6 +148,8 @@ namespace Inedo.DependencyScan
         private static void Publish(ArgList args)
         {
             var inputFileName = args.GetRequiredNamed("input");
+
+            Console.WriteLine($"Publishing {inputFileName}...");
 
             args.Named.TryGetValue("type", out var typeName);
             typeName = typeName ?? GetImplicitTypeName(inputFileName);
@@ -138,6 +209,7 @@ namespace Inedo.DependencyScan
             {
                 case ".sln":
                 case ".csproj":
+                case ".vbproj":
                     return "nuget";
 
                 case ".json":
