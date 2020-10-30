@@ -1,15 +1,22 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Xml.Linq;
+using System.Xml.XPath;
 
 namespace Inedo.DependencyScan
 {
     public static class Program
     {
+        private static XNamespace NuSpec = "http://schemas.microsoft.com/packaging/2010/07/nuspec.xsd";
+
         public static int Main(string[] args)
         {
             try
             {
+                var uniquePackages = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
                 if (args.Length < 1)
                 {
                     Usage();
@@ -88,17 +95,58 @@ namespace Inedo.DependencyScan
                     switch (argList.Command.ToLowerInvariant())
                     {
                         case "report":
-                            Report(argList);
+                            Report(argList, uniquePackages);
                             break;
 
                         case "publish":
-                            Publish(argList);
+                            Publish(argList, uniquePackages);
                             break;
 
                         default:
                             throw new PgScanException($"Invalid command: {argList.Command}", true);
                     }
                 }
+
+
+                if (uniquePackages.Any() && argList.Named.TryGetValue("application-nuspec", out var nuspecFile))
+                {
+                    Console.WriteLine("Adding Dependencies to NuSpec...");
+                    var xd = XDocument.Load(nuspecFile);
+
+                    var xeMetadata = xd.Root.Element(NuSpec + "metadata");
+                    var xe = xeMetadata.Element(NuSpec + "dependencies");
+                    if (xe == null)
+                    {
+                        xe = new XElement(NuSpec + "dependencies");
+                        xeMetadata.Add(xe);
+                    }
+
+                    foreach (var kvp in uniquePackages)
+                    {
+                        xe.Add(new XElement(NuSpec + "dependency", new XAttribute("id", kvp.Key), new XAttribute("version", kvp.Value)));
+                    }
+
+
+                    xe = xeMetadata.Element(NuSpec + "repository");
+                    if (xe == null)
+                    {
+                        xe = new XElement(NuSpec + "repository",
+                            new XAttribute("type", "git"),
+                            new XAttribute("url", Environment.GetEnvironmentVariable("BUILD_REPOSITORY_URI")),
+                            new XAttribute("commit", Environment.GetEnvironmentVariable("BUILD_SOURCEVERSION")));
+                        xeMetadata.Add(xe);
+                    }
+                    else
+                    {
+                        xe.SetAttributeValue("url", Environment.GetEnvironmentVariable("BUILD_REPOSITORY_URI"));
+                        xe.SetAttributeValue("commit", Environment.GetEnvironmentVariable("BUILD_SOURCEVERSION"));
+                    }
+
+                    xd.Save(nuspecFile);
+
+                    Console.WriteLine($"Dependencies added to NuSpec!  {uniquePackages.Count} represented.");
+                }
+
             }
             catch (PgScanException ex)
             {
@@ -113,7 +161,7 @@ namespace Inedo.DependencyScan
             return 0;
         }
 
-        private static void Report(ArgList args)
+        private static void Report(ArgList args, SortedDictionary<string, string> uniquePackages)
         {
             if (!args.Named.TryGetValue("input", out var inputFileName))
                 throw new PgScanException("Missing required argument --input=<input file name>");
@@ -145,7 +193,7 @@ namespace Inedo.DependencyScan
             }
         }
 
-        private static void Publish(ArgList args)
+        private static void Publish(ArgList args, SortedDictionary<string, string> uniquePackages)
         {
             var inputFileName = args.GetRequiredNamed("input");
 
@@ -184,12 +232,14 @@ namespace Inedo.DependencyScan
                 {
                     Console.WriteLine($"Publishing consumer data for {package}...");
 
+                    var name = consumerName ?? project.Name;
+
                     client.RecordPackageDependency(
                         package,
                         packageFeed,
                         new PackageConsumer
                         {
-                            Name = consumerName ?? project.Name,
+                            Name = name,
                             Version = consumerVersion,
                             Group = consumerGroup,
                             Feed = consumerFeed,
@@ -197,6 +247,18 @@ namespace Inedo.DependencyScan
                         },
                         apiKey
                     );
+
+                    if(uniquePackages.ContainsKey(package.Name))
+                    {
+                        if(Version.Parse(uniquePackages[package.Name]) < Version.Parse(package.Version))
+                        {
+                            uniquePackages[package.Name] = package.Version;
+                        }
+                    }
+                    else
+                    {
+                        uniquePackages.Add(package.Name, package.Version);
+                    }
                 }
             }
 
